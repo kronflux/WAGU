@@ -1,89 +1,215 @@
-version: "3"
+version: "3.8"
 
+# ┌─────────────────────────────────────────────┐
+# │ WAGU NETWORK ARCHITECTURE                   │
+# │ WireGuard + AdGuard + Unbound + Cloudflared │
+# └─────────────────────────────────────────────┘
 networks:
-  private_network:
+  # External network for frontend services
+  wagu_net:
+    enable_ipv6: false                                # Explicitly disable IPv6 to avoid dual-stack complications
     ipam:
       driver: default
       config:
-        - subnet: 10.2.0.0/24
+        - subnet: "10.2.0.0/24"
+    driver_opts:
+      com.docker.network.bridge.enable_icc: "false"   # Disable inter-container communication on bridge for stricter isolation
 
+  # Internal network for backend services (no client access)
+  wagu_internal:
+    internal: true                                    # Block all external traffic
+    enable_ipv6: false
+    ipam:
+      driver: default
+      config:
+        - subnet: "10.2.1.0/24"
+
+# ┌─────────────────────────────────────────────┐
+# │ SECRETS                                     │
+# └─────────────────────────────────────────────┘
+secrets:
+  wg_password:
+    file: .wg_password                                # This file contains the admin password for the WireGuard UI; kept secret via Docker Secrets
+                                                      # 🔒IMPORTANT: Run `chmod 600 .wg_password` to secure the file
+
+# ┌─────────────────────────────────────────────┐
+# │ SERVICES                                    │
+# └─────────────────────────────────────────────┘
 services:
-  unbound:
-    image: "klutchell/unbound"
-    container_name: unbound
-    restart: unless-stopped
-    hostname: "unbound"
-    networks:
-      private_network:
-        ipv4_address: 10.2.0.200
-
-  wg-easy:
-    depends_on: [unbound, pihole]
-    environment:
-      # ⚠️ Required:
-      # Change this to your host's public address
-      - WG_HOST= my.ddns.net
-      - PASSWORD=10h30
-      - WG_PORT=51820
-      - WG_DEFAULT_ADDRESS=10.6.0.x
-      - WG_DEFAULT_DNS=10.2.0.100
-      
-      # Optional:
-      # - WG_ALLOWED_IPS=192.168.15.0/24, 10.0.1.0/24
-      # - WG_INTERFACE=wg0
-      # - WG_MTU=1420
-      # - WG_ALLOWED_IPS=192.168.15.0/24, 10.0.1.0/24
-      # - WG_PERSISTENT_KEEPALIVE=25
-      # - WG_PRE_UP=echo "Pre Up" > /etc/wireguard/pre-up.txt
-      # - WG_POST_UP=echo "Post Up" > /etc/wireguard/post-up.txt
-      # - WG_PRE_DOWN=echo "Pre Down" > /etc/wireguard/pre-down.txt
-      # - WG_POST_DOWN=echo "Post Down" > /etc/wireguard/post-down.txt
-
-    image: ghcr.io/wg-easy/wg-easy:13
-    container_name: wg-easy
-    volumes:
-      - .:/etc/wireguard
-    ports:
-      - "51820:51820/udp"
-      - "51821:51821/tcp"
+  # 🌐 CLOUDFLARED: DNS-over-HTTPS proxy
+  # Encrypts all upstream DNS queries (Cloudflare + Quad9)
+  # - Only accessible by Unbound via internal-only network
+  cloudflared:
+    container_name: cloudflared
+    image: cloudflare/cloudflared:latest
+    hostname: cloudflared
     restart: unless-stopped
     cap_add:
-      - NET_ADMIN
+      - NET_BIND_SERVICE
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1              # Explicitly disable IPv6 routing inside container
+    environment:
+      TZ: "America/Edmonton"                          # Container timezone
+    command: >                                        # Start Cloudflared DNS proxy
+      proxy-dns --address 0.0.0.0
+      --port 5053
+      --upstream https://1.1.1.1/dns-query
+      --upstream https://1.0.0.1/dns-query
+      --max-upstream-conns 5
+      --bootstrap 1.1.1.1
+    networks:
+      wagu_net:
+        ipv4_address: "10.2.0.53"
+        aliases:
+          - cloudflared.wagu.local                    # Internal DNS resolver alias
+      wagu_internal:
+        ipv4_address: "10.2.1.53"
+    dns:
+      - 1.1.1.1                                       # DNS used for initial container-level name resolution (not for proxy queries)
+      - 1.0.0.1                                       # Secondary DNS for initial container-level name resolution (not for proxy queries)
+    labels:
+      org.wagu.project: "WAGU"
+      org.wagu.role: "upstream"
+      org.wagu.stack: "WireGuard, AdGuard, Unbound, Cloudflared"
+
+  # 🧠 UNBOUND: Validating, caching & validating DNS resolver
+  # - Provides DNSSEC validation and local caching
+  # - Upstream to Cloudflared (DoH) over internal network
+  # - Downstream to AdGuard
+  unbound:
+    container_name: unbound
+    image: madnuttah/unbound:latest
+    hostname: unbound
+    depends_on:
+      cloudflared:
+        condition: service_started                    # Ensure Cloudflared has started before Unbound
+    restart: unless-stopped
+    cap_add:
+      - NET_BIND_SERVICE
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1              # Explicitly disable IPv6 routing inside container
+    environment:
+      TZ: "America/Edmonton"                          # Container timezone
+      UNBOUND_UID: 1000
+      UNBOUND_GID: 1000
+      HEALTHCHECK_PORT: 5335                          # Port for health checks
+    volumes:
+      - ./unbound/unbound.conf:/usr/local/unbound/unbound.conf
+      - ./unbound/conf.d:/usr/local/unbound/conf.d
+      - ./unbound/zones.d:/usr/local/unbound/zones.d
+    networks:
+      wagu_net:
+        ipv4_address: "10.2.0.200"
+        aliases:
+          - unbound.wagu.local                        # Internal DNS resolver alias
+      wagu_internal:
+        ipv4_address: "10.2.1.200"
+    dns:
+      - 10.2.1.53                                     # Direct internal-only connection to cloudflared’s DoH proxy
+    healthcheck:
+      test: /usr/local/unbound/sbin/healthcheck.sh
+      interval: 5s
+      timeout: 15s
+      retries: 5
+    labels:
+      org.wagu.project: "WAGU"
+      org.wagu.role: "resolver"
+      org.wagu.stack: "WireGuard, AdGuard, Unbound, Cloudflared"
+
+  # 🛡️ ADGUARD HOME: DNS filtering + UI
+  # - Entry point for clients and VPN users
+  # - Blocks ads/malware before forwarding to Unbound
+  # - Web UI for configuration and logs on ports 80/3000
+  adguard:
+    container_name: adguard
+    image: adguard/adguardhome:latest
+    hostname: adguard
+    depends_on:
+      unbound:
+        condition: service_healthy                    # Ensure DNS resolution is ready before launching AdGuard
+    restart: unless-stopped
+    cap_add:
+      - NET_BIND_SERVICE
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1              # Explicitly disable IPv6 routing inside container
+    environment:
+      TZ: "America/Edmonton"                          # Container timezone
+      DNS_SERVERS: "10.2.0.200"                       # Force AdGuard to use Unbound as upstream resolver
+    volumes:
+      - ./adguard/work:/opt/adguardhome/work          # Runtime data (Query logs, temporary state)
+      - ./adguard/conf:/opt/adguardhome/conf          # Persistent config (filters, UI state)
+    ports:
+      - "53:53/tcp"                                   # Accept DNS over TCP
+      - "53:53/udp"                                   # Accept DNS over UDP
+      - "80:80/tcp"                                   # Web UI
+      - "3000:3000/tcp"                               # Initial setup wizard (first run only)
+    networks:
+      wagu_net:
+        ipv4_address: "10.2.0.100"
+        aliases:
+          - adguard.wagu.local                        # AdGuard Home web interface
+    dns:
+      - 10.2.0.200                                    # Direct internal-only connection to unbound
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 10.2.0.100 80"]
+      interval: 5s
+      timeout: 15s
+      retries: 5
+    labels:
+      org.wagu.project: "WAGU"
+      org.wagu.role: "dns"
+      org.wagu.stack: "WireGuard, AdGuard, Unbound, Cloudflared"
+
+  # 🚇 WG-EASY: WireGuard VPN with web UI
+  # - Provides secure remote access to your network
+  # - Exposes UDP port 51820 for WireGuard traffic
+  # - Web UI for peer management on TCP port 51821
+  # - DNS requests routed through AdGuard by default
+  wg-easy:
+    container_name: wg-easy
+    image: ghcr.io/wg-easy/wg-easy:latest
+    hostname: wg-easy
+    depends_on:
+      adguard:
+        condition: service_healthy                    # Ensure filtered DNS is up before allowing VPN traffic
+      unbound:
+        condition: service_healthy
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN                                     # Required for VPN
+      - NET_BIND_SERVICE
       - SYS_MODULE
     sysctls:
-      - net.ipv4.ip_forward=1
+      - net.ipv4.ip_forward=1                         # Enable packet forwarding
       - net.ipv4.conf.all.src_valid_mark=1
-    dns:
-      - 10.2.0.100 # Points to pihole
-      - 10.2.0.200 # Points to unbound
-    networks:
-      private_network:
-        ipv4_address: 10.2.0.3
-
-  pihole:
-    depends_on: [unbound]
-    container_name: pihole
-    image: pihole/pihole:latest
-    restart: unless-stopped
-    hostname: pihole
-    dns:
-      - 127.0.0.1
-      - 10.2.0.200 # Points to unbound
+      - net.ipv6.conf.all.disable_ipv6=1              # Explicitly disable IPv6 routing inside container
     environment:
-      TZ: "Asia/Hong_Kong"
-      FTLCONF_webserver_api_password: "" # Blank password - Can be whatever you want.
-      FTLCONF_dns_listeningMode: 'all'
-      ServerIP: 10.2.0.100 # Internal IP of pihole
-      DNS1: 10.2.0.200 # Unbound IP
-      DNS2: 10.2.0.200 # If we don't specify two, it will auto pick google.
-    # Volumes store your data between container upgrades
+      TZ: "America/Edmonton"                          # Container timezone
+      PASSWORD_FILE: /run/secrets/wg_password
+      WG_HOST: "your.ddns.net"                        # ⚠️ Replace with your public IP or domain
+      WG_DEVICE: eth0
+      WG_PORT: 51820                                  # WireGuard UDP port
+      WG_DEFAULT_ADDRESS: "10.6.0.x"                  # VPN Client IP subnet
+      WG_DEFAULT_DNS: "10.2.0.100"                    # Force AdGuard as DNS
+      WG_ALLOWED_IPS: "0.0.0.0/0, ::/0"
+      WG_PERSISTENT_KEEPALIVE: "25"
+    secrets:
+      - wg_password
     volumes:
-      - "./etc-pihole/:/etc/pihole/"
-      - "./etc-dnsmasq.d/:/etc/dnsmasq.d/"
-    # Recommended but not required (DHCP needs NET_ADMIN)
-    #   https://github.com/pi-hole/docker-pi-hole#note-on-capabilities
-    cap_add:
-      - NET_ADMIN
+      - ./wg-easy:/etc/wireguard                      # Persist peer configs storage
+      - /lib/modules:/lib/modules:ro
+    ports:
+      - "51820:51820/udp"                             # WireGuard VPN traffic port
+      - "51821:51821/tcp"                             # Web UI for admin
     networks:
-      private_network:
-        ipv4_address: 10.2.0.100
+      wagu_net:
+        ipv4_address: "10.2.0.3"
+        aliases:
+          - wireguard.wagu.local                      # WireGuard admin UI
+    dns:
+      - 10.2.0.100                                    # Primary DNS is AdGuard (filtered DNS)
+      - 10.2.0.200                                    # Fallback to Unbound if AdGuard is down
+    labels:
+      org.wagu.project: "WAGU"
+      org.wagu.role: "vpn"
+      org.wagu.stack: "WireGuard, AdGuard, Unbound, Cloudflared"

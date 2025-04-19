@@ -1,280 +1,143 @@
-## What is this?
-WireHole (UI) is a fork of WireHole, which is a combination of WireGuard, PiHole, and Unbound in a docker-compose project with the intent of enabling users to quickly and easily create and deploy a personally managed full or split-tunnel WireGuard VPN with ad blocking capabilities (via Pihole), and DNS caching with additional privacy options (via Unbound). 
+# WAGU - WireGuard, AdGuard, Unbound + Cloudflared
 
-Wirehole (UI) is added a Web UI for WireGuard Client Management. It use the Docker image of [wg-easy](https://github.com/WeeJeWel/wg-easy), replacing the Linuxserver's WireGuard image.
+An all-in-one hardened, privacy-focused VPN + DNS stack powered by Docker Compose.
 
-<p align="center">
-  <img src="./wirehole-ui.png" width="702" />
-</p>
+WAGU bundles:
+- **[WireGuard](https://github.com/wireguard) + Web UI ([wg-easy](https://github.com/wg-easy/wg-easy))**: simple client management
+- **[AdGuard Home](https://github.com/AdguardTeam/AdGuardHome)**: ad/tracker blocking DNS server with web UI
+- **[Unbound](https://github.com/NLnetLabs/unbound)**: DNSSEC-validating, caching DNS resolver
+- **[Cloudflared](https://github.com/cloudflare/cloudflared)**: secure DNS-over-HTTPS proxy (to Cloudflare, Quad9, etc.)
 
-WireHole 
-
-## Features
-
-* All-in-one: WireGuard + Web UI + Adblock (via Pi-Hole) + DNS Caching (via Unbound)
-* Easy installation, simple to use.
-* List, create, edit, delete, enable & disable clients.
-* Show a client's QR code.
-* Download a client's configuration file.
-* Statistics for which clients are connected.
-* Gravatar support.
-
-## Author
-
-👤 **Devin Stokes**
-
-* Twitter: [@DevinStokes](https://twitter.com/DevinStokes)
-* Github: [@IAmStoxe](https://github.com/IAmStoxe)
-
-## 🤝 Contributing
-
-Contributions, issues and feature requests are welcome!<br />Feel free to check [issues page](https://github.com/IAmStoxe/wirehole/issue). 
-
-## Show your support
-
-Give a ⭐ if this project helped you!
-
-<a href="https://www.buymeacoffee.com/stoxe" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-orange.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
- 
 ---
 
-### Quickstart
-To get started all you need to do is clone the repository and spin up the containers.
+## 🌐 Features
 
+- **Hardened container security**
+  - Runs as non-root with `cap_drop`, `init`, and Docker secrets
+  - Health checks for service readiness
+
+- **Smart DNS routing architecture:**
+  - `WireGuard clients` → `AdGuard` → `Unbound` → `Cloudflared` → DoH (Cloudflare)
+
+---
+
+## 🚀 Setup Instructions
+
+### 1. Clone and Prepare Directory Structure
 ```bash
-git clone https://github.com/10h30/wirehole-ui.git
-cd wirehole-ui
-nano docker-compose.yml
+git clone https://github.com/kronflux/WAGU.git
+cd WAGU
+
+mkdir -p adguard/conf \
+         adguard/work \
+         wg-easy \
+         unbound/conf.d \
+         unbound/zones.d
+
+echo "your_password" > .wg_password
+chmod 600 .wg_password
 ```
-If you are using Raspberry Pi, please uncomment `#image: "mvance/unbound-rpi:latest"` and add comment to `image: "mvance/unbound:latest"`
 
-
-### Full Setup
+### 2. Run AdGuard Home Setup Wizard
 ```bash
-#!/bin/bash
-
-# Prereqs and docker
-sudo apt-get update &&
-    sudo apt-get install -yqq \
-        curl \
-        git \
-        apt-transport-https \
-        ca-certificates \
-        gnupg-agent \
-        software-properties-common
-
-# Install Docker repository and keys
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
-
-sudo add-apt-repository \
-    "deb [arch=amd64] https://download.docker.com/linux/ubuntu \
-        $(lsb_release -cs) \
-        stable" &&
-    sudo apt-get update &&
-    sudo apt-get install docker-ce docker-ce-cli containerd.io -yqq
-
-# docker-compose
-sudo curl -L "https://github.com/docker/compose/releases/download/1.26.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose &&
-    sudo chmod +x /usr/local/bin/docker-compose &&
-    sudo ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
-
-# wirehole
-git clone https://github.com/10h30/wirehole-ui.git &&
-    cd wirehole &&
-    docker-compose up
-
-```
-Change `WG_HOST=my.ddns.net` to your server's public address, e.g. `WG_HOST=vpn.mydomain.com`.
-> By default, any WireGuard client will have access to the Web UI, unless you set a password.
-The Web UI will be available on http://0.0.0.0:51821. You can create new clients there.
-
----
-
-## Recommended configuration / Split tunnel:
-
-Modify your wireguard client `AllowedIps` to `10.2.0.0/24` to only tunnel the web panel and DNS traffic.
-
----
-
-## Access PiHole
-
-While connected to WireGuard, navigate to http://10.2.0.100/admin
-
-*The password (unless you set it in `docker-compose.yml`) is blank.*
-
-![](https://i.imgur.com/hlHL6VA.png)
-
----
-
-## Configuring for Dynamic DNS (DDNS)
-If you're using a dynamic DNS provider, you can edit `docker-compose.yml` under "wireguard". 
-Here is an excerpt from the file. 
-
-You need to uncomment `#- WG_HOST` so it reads `- WG_HOST` without the `#` and then change `my.ddns.net` to your DDNS URL.
-
-```yaml
-wireguard:
-   # ...
-    environment:
-      # ...
-      - WG_HOST=my.ddns.net #optional - For use with DDNS (Uncomment to use)
-      # ...
- # ...
+docker compose up -d --no-deps adguard
 ```
 
----
-## Configuring / Parameters
+- Visit: `http://<hostIP>:3000`
+- Choose a **username** and **password**
+- For both DNS interfaces, select: `eth0`
+- Finish the setup and log in at: `http://<hostIP>:80`
 
-Container images are configured using parameters passed at runtime (such as those above). These parameters are separated by a colon and indicate `<external>:<internal>` respectively. For example, `-p 8080:80` would expose port `80` from inside the container to be accessible from the host's IP on port `8080` outside the container.
-
-### Environment variables from files (Docker secrets)
-
-You can set any environment variable from a file by using a special prepend `FILE__`.
-
-As an example:
-
-```bash
--e FILE__PASSWORD=/run/secrets/mysecretpassword
-```
-
-Will set the environment variable `PASSWORD` based on the contents of the `/run/secrets/mysecretpassword` file.
-
-### Umask for running applications
-
-There is the ability to override the default umask settings for services started within the containers using the optional `-e UMASK=022` setting.
-Keep in mind umask is not chmod it subtracts from permissions based on it's value it does not add. Please read up [here](https://en.wikipedia.org/wiki/Umask) before asking for support.
-
-### User / Group Identifiers
-
-When using volumes (`-v` flags) permissions issues can arise between the host OS and the container, this is avoided by allowing you to specify the user `PUID` and group `PGID`.
-
-Ensure any volume directories on the host are owned by the same user you specify and any permissions issues will vanish like magic.
-
-In this instance `PUID=1000` and `PGID=1000`, to find yours use `id user` as below:
-
-```bash
-  $ id username
-    uid=1000(dockeruser) gid=1000(dockergroup) groups=1000(dockergroup)
-```
-
----
-
-
-## Modifying the upstream DNS provider for Unbound
-If you choose to not use Cloudflare any reason you are able to modify the upstream DNS provider in `unbound.conf`.
-
-Search for `forward-zone` and modify the IP addresses for your chosen DNS provider.
-
->**NOTE:** The anything after `#` is a comment on the line. 
-What this means is it is just there to tell you which DNS provider you put there. It is for you to be able to reference later. I recommend updating this if you change your DNS provider from the default values.
-
-
-```yaml
-forward-zone:
-        name: "."
-        forward-addr: 1.1.1.1@853#cloudflare-dns.com
-        forward-addr: 1.0.0.1@853#cloudflare-dns.com
-        forward-addr: 2606:4700:4700::1111@853#cloudflare-dns.com
-        forward-addr: 2606:4700:4700::1001@853#cloudflare-dns.com
-        forward-tls-upstream: yes
-```
-
----
-
-## Available DNS Providers
-
-While you can actually use any upstream provider you want, the team over at pi-hole.net provide a fantastic break down along with all needed information of some of the more popular providers here:
-https://docs.pi-hole.net/guides/upstream-dns-providers/
-
-Providers they have the information for:
-
-1. Google
-2. OpenDNS
-3. Level3
-4. Comodo
-5. DNS.WATCH
-6. Quad9
-7. CloudFlare DNS
-
-
----
-
-## Setting a DNS record for pihole
-1. Login to pihole admin
-2. Navigate to "Local Records"
-3. Fill out the form like the image below
-![Image](https://i.imgur.com/PM1kwcf.png)
-
-Provided your DNS is properly configured on the device you're using, and you're connected to WireGuard, you can now navigate to http://pi.hole/admin and it should take you right to the pihole admin interface.
-
----
-
-## Updating Info
-
-Below are the instructions for updating **containers**:
-
-### Via Docker Compose
-
-* Update all images: `docker-compose pull`
-  * or update a single image: `docker-compose pull wireguard`
-* Let compose update all containers as necessary: `docker-compose up -d`
-  * or update a single container: `docker-compose up -d wireguard`
-* You can also remove the old dangling images: `docker image prune`
-
-### Via Watchtower auto-updater (only use if you don't remember the original parameters)
-
-* Pull the latest image at its tag and replace it with the same env variables in one run:
-
-  ```bash
-  docker run --rm \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  containrrr/watchtower \
-  --run-once wireguard
+### 3. Configure AdGuard DNS Upstream
+- Go to **Settings → DNS Settings**
+- Set **Upstream DNS servers** to:
   ```
+  10.2.0.200:5335
+  ```
+- Set **Bootstrap DNS server** to `1.1.1.1`
+- Click **Apply**
 
-* You can also remove the old dangling images: `docker image prune`
-
-> **Note:** Watchtower is not endorsed as a solution for automated updates of existing Docker containers. In fact generally automated updates are discouraged. However, this is a useful tool for one-time manual updates of containers where you have forgotten the original parameters. In the long term, LinuxServer.io highly recommends using Docker Compose.
-
-
----
-
-
-## FAQ
-
-### Can I build ARM variants on x86_64?
-
-The ARM variants can be built on x86_64 hardware using `multiarch/qemu-user-static`
-
+### 4. Finalize Full Stack
 ```bash
-docker run --rm --privileged multiarch/qemu-user-static:register --reset
+docker compose down adguard
+docker compose up -d
 ```
 
-Once registered you can define the dockerfile to use with `-f Dockerfile.aarch64`.
+---
 
-### Where can I get additional block lists?
-* [The Big Blocklist Collection](https://firebog.net/)
+## 🔗 Accessing Services
 
-### Commonly whitelisted domains
-* [Pi-Hole Community List](https://discourse.pi-hole.net/t/commonly-whitelisted-domains/212)
-* [anudeepND Whitelist](https://github.com/anudeepND/whitelist)
+Use the IP address of your Docker host (e.g., `http://192.168.X.X`) to access services:
 
-### Why do you use Unbound / What benefit is there to using Unbound?
-* [PiHole Official Site: What does this guide provide?](https://docs.pi-hole.net/guides/unbound/#what-does-this-guide-provide)
+- **AdGuard Home Web UI:** `http://<hostIP>:80`
+- **AdGuard Setup Wizard (first time only):** `http://<hostIP>:3000`
+- **WireGuard Web UI:** `http://<hostIP>:51821`
+- **VPN Clients DNS Resolver:** `10.2.0.100`
 
 ---
 
-## Networking Considerations
+## 🧪 Troubleshooting
 
-If you plan to use Wireguard both remotely and locally, say on your mobile phone, you will need to consider routing. Most firewalls will not route ports forwarded on your WAN interface correctly to the LAN out of the box. This means that when you return home, even though you can see the Wireguard server, the return packets will probably get lost.
+### Cloudflared not resolving?
+```bash
+docker logs cloudflared
+```
 
-This is not a Wireguard specific issue and the two generally accepted solutions are NAT reflection (setting your edge router/firewall up in such a way as it translates internal packets correctly) or split horizon DNS (setting your internal DNS to return the private rather than public IP when connecting locally).
+### Unbound health check failing?
+```bash
+docker exec -it unbound /usr/local/unbound/sbin/healthcheck.sh
+```
 
-Both of these approaches have positives and negatives however their setup is out of scope for this document as everyone's network layout and equipment will be different.
-
+### Can't resolve DNS via AdGuard?
+```bash
+docker exec -it adguard dig @10.2.0.200 example.com
+```
 
 ---
 
-###### Shout out to LinuxServer.io for their documentation and maintenance of the incredible Wireguard image.
+## 🧱 Split Tunnel Mode
+Only tunnel WAGU-related traffic:
+```ini
+AllowedIPs = 10.2.0.0/24
+```
 
---- 
+---
+
+## 🔄 Updating
+```bash
+docker compose pull && docker compose up -d
+```
+To clean old images:
+```bash
+docker image prune
+```
+
+---
+
+## 🌐 Dynamic DNS Setup
+In `docker-compose.yml`, set your hostname:
+```yaml
+environment:
+  WG_HOST: "your.ddns.net"
+```
+
+---
+
+## 📒 FAQ
+
+### Where do I set custom hostnames?
+**AdGuard → Settings → DNS Settings → Custom DNS entries**
+
+### Recommended Blocklists?
+- https://firebog.net/
+- https://github.com/anudeepND/whitelist
+
+### Want to change DoH provider?
+Modify Cloudflared command in `docker-compose.yml`.
+
+---
+
+## 🙏 Credits
+Based on work by [@IAmStoxe](https://github.com/IAmStoxe) (WireHole), [@10h30](https://github.com/10h30) (WireHole UI)
+
+---
